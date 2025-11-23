@@ -1,0 +1,9 @@
+{
+  "drinkType": "Americano",
+  "size": "Medium",
+  "milk": "Almond",
+  "extras": [
+    "Whipped cream"
+  ],
+  "name": "Ankit"
+}

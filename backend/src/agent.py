@@ -12,8 +12,8 @@ from livekit.agents import (
     cli,
     metrics,
     tokenize,
-    # function_tool,
-    # RunContext
+    function_tool,
+    RunContext,
 )
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -25,12 +25,78 @@ load_dotenv(".env.local")
 
 class Assistant(Agent):
     def __init__(self) -> None:
+        # The assistant acts as a friendly coffee shop barista.
+        # It should collect an order with the following shape:
+        # {
+        #   "drinkType": "string",
+        #   "size": "string",
+        #   "milk": "string",
+        #   "extras": ["string"],
+        #   "name": "string"
+        # }
+        # Behavior:
+        # - Ask clarifying questions until all fields are filled.
+        # - When the order is complete, call the `save_order` tool with the order object.
+        # - After saving, read back a neat one-paragraph text summary of the order to the user.
         super().__init__(
-            instructions="""You are a helpful voice AI assistant. The user is interacting with you via voice, even if you perceive the conversation as text.
-            You eagerly assist users with their questions by providing information from your extensive knowledge.
-            Your responses are concise, to the point, and without any complex formatting or punctuation including emojis, asterisks, or other symbols.
-            You are curious, friendly, and have a sense of humor.""",
+            instructions="""
+            You are a friendly coffee shop barista for 'Daily Grind Coffee'. You take voice orders and help customers build their drinks.
+
+            Always collect the customer's order into an object with exactly these fields:
+            {
+              "drinkType": "string",
+              "size": "string",
+              "milk": "string",
+              "extras": ["string"],
+              "name": "string"
+            }
+
+            Ask short, focused clarifying questions until every field is filled. Examples of clarifying questions:
+            - "What size would you like? Small, Medium, or Large?"
+            - "Do you want regular milk, oat milk, almond, or soy?"
+            - "Any extras, like whipped cream or caramel drizzle?"
+            - "May I have the name for the order?"
+
+            When you believe the order object is complete, call the tool named `save_order` with the order object as its single argument.
+            After the tool returns, speak a concise, friendly summary of the completed order (one paragraph).
+
+            Keep responses conversational and concise. Do not include extraneous punctuation or symbols.
+            """,
         )
+
+    @function_tool
+    async def save_order(self, context: RunContext, order: dict):
+        """Save the completed order to a JSON file and return the saved path and order.
+
+        The LLM will call this tool once the order is complete. The tool will create
+        a `backend/orders/` directory (if missing) and write a timestamped JSON file.
+        """
+        import json
+        import os
+        import datetime
+
+        # Resolve orders directory relative to this file -> backend/orders
+        base_dir = os.path.join(os.path.dirname(__file__), "..")
+        orders_dir = os.path.abspath(os.path.join(base_dir, "orders"))
+        os.makedirs(orders_dir, exist_ok=True)
+
+        timestamp = datetime.datetime.utcnow().isoformat().replace(":", "-")
+        filename = f"order_{timestamp}.json"
+        full_path = os.path.join(orders_dir, filename)
+
+        # Normalize order shape to ensure all fields exist
+        normalized = {
+            "drinkType": order.get("drinkType", ""),
+            "size": order.get("size", ""),
+            "milk": order.get("milk", ""),
+            "extras": order.get("extras", []) or [],
+            "name": order.get("name", ""),
+        }
+
+        with open(full_path, "w", encoding="utf-8") as f:
+            json.dump(normalized, f, indent=2, ensure_ascii=False)
+
+        return {"status": "saved", "path": full_path, "order": normalized}
 
     # To add tools, use the @function_tool decorator.
     # Here's an example that adds a simple weather tool.
