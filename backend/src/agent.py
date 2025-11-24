@@ -1,4 +1,8 @@
 import logging
+import os
+import json
+from datetime import datetime
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -23,80 +27,86 @@ logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
 
+@function_tool
+async def save_wellness(
+    ctx: RunContext,
+    mood: str,
+    energy: str,
+    objectives: List[str],
+    notes: Optional[str] = None,
+) -> str:
+    """Save a wellness check-in to `wellness_log.json` and return a short confirmation.
+
+    Schema (one entry):
+    {
+      "timestamp": "ISO string",
+      "mood": "user text",
+      "energy": "user text or scale",
+      "objectives": ["1..3 objectives"],
+      "notes": "optional agent summary"
+    }
+    """
+
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        "mood": mood,
+        "energy": energy,
+        "objectives": objectives or [],
+        "notes": notes or "",
+    }
+
+    # Place file next to the backend folder (one level up from this file)
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    path = os.path.join(base_dir, "wellness_log.json")
+    # Ensure file exists and is a JSON array
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or []
+        else:
+            data = []
+    except Exception:
+        data = []
+
+    data.append(entry)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    return f"saved:{path}"
+
+
 class Assistant(Agent):
-    def __init__(self) -> None:
-        # The assistant acts as a friendly coffee shop barista.
-        # It should collect an order with the following shape:
-        # {
-        #   "drinkType": "string",
-        #   "size": "string",
-        #   "milk": "string",
-        #   "extras": ["string"],
-        #   "name": "string"
-        # }
-        # Behavior:
-        # - Ask clarifying questions until all fields are filled.
-        # - When the order is complete, call the `save_order` tool with the order object.
-        # - After saving, read back a neat one-paragraph text summary of the order to the user.
-        super().__init__(
-            instructions="""
-            You are a friendly coffee shop barista for 'Daily Grind Coffee'. You take voice orders and help customers build their drinks.
+    def __init__(self, previous_entry: Optional[dict] = None) -> None:
+        # Wellness-focused companion: daily check-ins, non-diagnostic support
+        prev_note = ""
+        if previous_entry:
+            prev_ts = previous_entry.get("timestamp")
+            prev_mood = previous_entry.get("mood")
+            prev_energy = previous_entry.get("energy")
+            prev_obj = ", ".join(previous_entry.get("objectives", []))
+            prev_note = (
+                f"Last time ({prev_ts}) you said your mood was '{prev_mood}' and energy was '{prev_energy}'. "
+                f"You were focusing on: {prev_obj}."
+            )
 
-            Always collect the customer's order into an object with exactly these fields:
-            {
-              "drinkType": "string",
-              "size": "string",
-              "milk": "string",
-              "extras": ["string"],
-              "name": "string"
-            }
-
-            Ask short, focused clarifying questions until every field is filled. Examples of clarifying questions:
-            - "What size would you like? Small, Medium, or Large?"
-            - "Do you want regular milk, oat milk, almond, or soy?"
-            - "Any extras, like whipped cream or caramel drizzle?"
-            - "May I have the name for the order?"
-
-            When you believe the order object is complete, call the tool named `save_order` with the order object as its single argument.
-            After the tool returns, speak a concise, friendly summary of the completed order (one paragraph).
-
-            Keep responses conversational and concise. Do not include extraneous punctuation or symbols.
-            """,
+        instructions = (
+            "You are a calm, grounded, and supportive health & wellness companion. "
+            "You are NOT a clinician and must not provide medical advice or diagnosis. "
+            "Your role is to do a short daily check-in: ask about mood, energy, and any stressors; "
+            "ask for 1–3 practical objectives for the day; offer short, realistic, non-medical suggestions; "
+            "and close with a concise recap and confirmation. "
+            "Keep suggestions small and actionable (e.g., take a 5-minute walk, break tasks into steps, drink water, take short breaks). "
+            "When the user confirms goals, persist the check-in by calling the tool"
+            " `save_wellness(mood, energy, objectives, notes)` with a brief agent summary sentence. "
+            "Always politely refuse harmful or unsafe requests. "
         )
 
-    @function_tool
-    async def save_order(self, context: RunContext, order: dict):
-        """Save the completed order to a JSON file and return the saved path and order.
+        # If a previous entry exists, include a brief reference that the agent can use
+        if prev_note:
+            instructions = prev_note + " " + instructions
 
-        The LLM will call this tool once the order is complete. The tool will create
-        a `backend/orders/` directory (if missing) and write a timestamped JSON file.
-        """
-        import json
-        import os
-        import datetime
-
-        # Resolve orders directory relative to this file -> backend/orders
-        base_dir = os.path.join(os.path.dirname(__file__), "..")
-        orders_dir = os.path.abspath(os.path.join(base_dir, "orders"))
-        os.makedirs(orders_dir, exist_ok=True)
-
-        timestamp = datetime.datetime.utcnow().isoformat().replace(":", "-")
-        filename = f"order_{timestamp}.json"
-        full_path = os.path.join(orders_dir, filename)
-
-        # Normalize order shape to ensure all fields exist
-        normalized = {
-            "drinkType": order.get("drinkType", ""),
-            "size": order.get("size", ""),
-            "milk": order.get("milk", ""),
-            "extras": order.get("extras", []) or [],
-            "name": order.get("name", ""),
-        }
-
-        with open(full_path, "w", encoding="utf-8") as f:
-            json.dump(normalized, f, indent=2, ensure_ascii=False)
-
-        return {"status": "saved", "path": full_path, "order": normalized}
+        super().__init__(instructions=instructions, tools=[save_wellness])
 
     # To add tools, use the @function_tool decorator.
     # Here's an example that adds a simple weather tool.
@@ -187,9 +197,22 @@ async def entrypoint(ctx: JobContext):
     # # Start the avatar and wait for it to join
     # await avatar.start(session, room=ctx.room)
 
+    # Before starting, read the wellness log and pass the most recent entry to the Assistant
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    wellness_path = os.path.join(base_dir, "wellness_log.json")
+    last_entry = None
+    try:
+        if os.path.exists(wellness_path):
+            with open(wellness_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or []
+                if isinstance(data, list) and data:
+                    last_entry = data[-1]
+    except Exception:
+        last_entry = None
+
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
-        agent=Assistant(),
+        agent=Assistant(previous_entry=last_entry),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             # For telephony applications, use `BVCTelephony` for best results
